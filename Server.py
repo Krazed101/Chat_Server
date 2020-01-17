@@ -1,46 +1,55 @@
 import socket
-import types
-import selectors
+import select
+import queue
 
-def accept_wrapper(sock):
-    conn, addr = sock.accept()
-    print("Accepted connection from", addr)
-    conn.setblocking(False)
-    data = types.SimpleNamespace(addr=addr, inb=b'', outb=b'')
-    events = selectors.EVENT_READ | selectors.EVENT_WRITE
-    sel.register(conn, events, data=data)
+server = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+server.setblocking(0)
+server.bind(('localhost', 9292))
+server.listen(5)
+inputs = [server]
+outputs = []
+message_queues = {}
 
-def service_connection(key, mask):
-    sock = key.fileobj
-    data = key.data
-    if mask & selectors.EVENT_READ:
-        recv_data = sock.recv(1024)
-        if recv_data:
-            data.outb += recv_data
+while inputs:
+    readable, writable, exceptional = select.select(inputs, outputs, inputs)
+    for conn in readable:
+        print(str(conn) + " in Readable")
+        if conn is server:
+            connection, client_address = conn.accept()
+            connection.setblocking(0)
+            inputs.append(connection)
+            message_queues[connection] = queue.Queue()
         else:
-            print("Closing connection to", data.addr)
-            sel.unregister(sock)
-            sock.close()
-    if mask & selectors.EVENT_WRITE:
-        if data.outb:
-            print("Echoing:", repr(data.outb), "to", data.addr)
-            sent = sock.send(data.outb)
-            data.outb = data.outb[sent:]
+            data = conn.recv(1024)
+            print("Data Received")
+            if data or str(data.decode()).lower() != "exit":
+                print("Data Exists and isn't exit")
+                for c in inputs:
+                    print(c)
+                    if c != conn and c != server:
+                        print("Adding Connection to Output")
+                        message_queues[c].put_nowait(data)
+                        outputs.append(c)
+            else:
+                if conn in outputs:
+                    outputs.remove(conn)
+                inputs.remove(conn)
+                conn.close()
+                del message_queues[conn]
 
-host = "127.0.0.1"
-port = 8080
-sel = selectors.DefaultSelector()
-lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-lsock.bind((host,port))
-lsock.listen()
-print("listening on ", (host,port))
-lsock.setblocking(False)
-sel.register(lsock, selectors.EVENT_READ, data = None)
-while True:
-    events = sel.select(timeout=None)
-    for key, mask in events:
-        if key.data is None:
-            accept_wrapper(key.fileobj)
+    for conn in writable:
+        print(str(conn) + " in Writable")
+        try:
+            next_msg = message_queues[conn].get_nowait()
+        except queue.Empty:
+            outputs.remove(conn)
         else:
-            service_connection(key, mask)
+            conn.sendall(next_msg)
 
+    for conn in exceptional:
+        print(str(conn) + " in Exceptional")
+        inputs.remove(conn)
+        if conn in outputs:
+            outputs.remove(conn)
+        conn.close()
+        del message_queues[conn]
